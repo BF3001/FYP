@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Live IP Map + Cache Viewer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            font-family: "Segoe UI", sans-serif;
+            background: #f4f4f4;
+            color: #333;
+        }
+        #map {
+            height: 100vh;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 5%;
+            left: 5%;
+            width: 90%;
+            height: 90%;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 0 12px rgba(0, 0, 0, 0.1);
+            z-index: 999;
+            padding: 20px;
+            overflow: auto;
+        }
+        .modal h3 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            color: #007bff;
+            border-bottom: 1px solid #ccc;
+            padding-bottom: 0.5em;
+        }
+        .modal table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+        .modal th, .modal td {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+            text-align: left;
+        }
+        .close-btn {
+            float: right;
+            font-weight: bold;
+            font-size: 1.1em;
+            color: #888;
+            cursor: pointer;
+        }
+        .close-btn:hover {
+            color: #333;
+        }
+        .popup-content {
+            max-width: 250px;
+            word-wrap: break-word;
+            font-size: 13px;
+            line-height: 1.4;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            font-size: 12px;
+            border-radius: 6px;
+            margin: 2px 0;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            font-size: 14px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+        }
+        iframe {
+            width: 100%;
+            height: 85vh;
+            border: none;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div id="cacheModal" class="modal">
+        <span id="closeBtn" class="close-btn">[X] Close</span>
+        <h3>Cached IP Records</h3>
+        <input type="text" id="searchInput" placeholder="Search IP or Location...">
+        <table id="cacheTable">
+            <thead>
+                <tr>
+                    <th>IP</th>
+                    <th>Location</th>
+                    <th>App</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div id="tracerouteModal" class="modal">
+        <span id="tracerouteCloseBtn" class="close-btn">[X] Close</span>
+        <h3>Traceroute Path</h3>
+        <iframe id="tracerouteFrame"></iframe>
+    </div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        const map = L.map('map').setView([20, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        const markers = {};
+
+        async function fetchAndUpdate() {
+            const res = await fetch('/get_ip_data');
+            const data = await res.json();
+            const ipList = data.sorted_ip_data;
+
+            for (const [ip, info] of ipList) {
+                const { lat, lon, location, app } = info;
+                if (!lat || !lon) continue;
+
+                if (markers[ip]) {
+                    markers[ip].setLatLng([lat, lon]);
+                } else {
+                    const marker = L.marker([lat, lon]).addTo(map)
+                        .bindPopup(`<div class='popup-content'><b>${ip}</b><br>${location}<br>${app}</div>`)
+                        .on('click', function () {
+                            fetch(`/scan?ip=${ip}`)
+                                .then(r => r.json())
+                                .then(result => {
+                                    const open = result.open_ports.length > 0 ? result.open_ports.join(', ') : 'None';
+                                    marker.bindPopup(`
+                                        <div class='popup-content'>
+                                            <b>${ip}</b><br>
+                                            ${location}<br>
+                                            ${app}<br>
+                                            <b>Open Ports:</b> ${open}<br>
+                                            <button onclick=\"runExtra('${ip}', 'banner')\">Banner</button>
+                                            <button onclick=\"runExtra('${ip}', 'webinfo')\">Web</button>
+                                            <button onclick=\"runExtra('${ip}', 'os_detect')\">OS</button>
+                                            <button onclick=\"runExtra('${ip}', 'dns_lookup')\">DNS</button>
+                                            <button onclick=\"runTraceroute('${ip}')\">Traceroute</button>
+                                            <div id='extra-${ip}' style='margin-top:6px; font-size: 90%;'></div>
+                                        </div>
+                                    `).openPopup();
+                                });
+                        });
+                    markers[ip] = marker;
+                }
+            }
+        }
+
+        function runExtra(ip, type) {
+            fetch(`/${type}?ip=${ip}`)
+                .then(r => r.json())
+                .then(result => {
+                    const box = document.getElementById(`extra-${ip}`);
+                    if (!box) return;
+                    box.innerText = `${type.toUpperCase()}: ` + JSON.stringify(result);
+                });
+        }
+
+        function runTraceroute(ip) {
+            fetch(`/traceroute?ip=${ip}`)
+                .then(r => r.json())
+                .then(result => {
+                    if (result.url) {
+                        document.getElementById('tracerouteFrame').src = result.url;
+                        document.getElementById('tracerouteModal').style.display = 'block';
+                    } else {
+                        alert("Traceroute failed: " + JSON.stringify(result));
+                    }
+                });
+        }
+
+        fetchAndUpdate();
+        setInterval(fetchAndUpdate, 8000);
+
+        document.addEventListener('keydown', function (e) {
+            if (e.shiftKey && e.key === 'S') {
+                document.getElementById('cacheModal').style.display = 'block';
+                loadCacheTable();
+            }
+        });
+
+        document.getElementById('closeBtn').onclick = () => {
+            document.getElementById('cacheModal').style.display = 'none';
+        };
+
+        document.getElementById('tracerouteCloseBtn').onclick = () => {
+            document.getElementById('tracerouteModal').style.display = 'none';
+            document.getElementById('tracerouteFrame').src = '';
+        };
+
+        async function loadCacheTable() {
+            const res = await fetch('/all_cache');
+            const data = await res.json();
+            const tableBody = document.querySelector('#cacheTable tbody');
+            tableBody.innerHTML = '';
+
+            data.all_data.forEach(([ip, info]) => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${ip}</td>
+                    <td>${info.location}</td>
+                    <td>${info.app}</td>
+                    <td>${new Date(info.last_seen * 1000).toLocaleString('en-US')}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        document.getElementById('searchInput').addEventListener('input', function () {
+            const filter = this.value.toLowerCase();
+            const rows = document.querySelectorAll('#cacheTable tbody tr');
+            rows.forEach(row => {
+                const text = row.innerText.toLowerCase();
+                row.style.display = text.includes(filter) ? '' : 'none';
+            });
+        });
+    </script>
+</body>
+</html>
+
